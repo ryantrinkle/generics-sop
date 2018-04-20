@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TemplateHaskellQuotes #-}
 -- | Generate @generics-sop@ boilerplate instances using Template Haskell.
 module Generics.SOP.TH
   ( deriveGeneric
@@ -108,12 +108,12 @@ deriveGenericFunctions n codeName fromName toName = do
   withDataDec dec $ \_isNewtype _cxt name bndrs cons _derivs -> do
     let codeType = codeFor cons                        -- '[ '[Int], '[Tree, Tree] ]
     let origType = appTyVars name bndrs                -- Tree
-    let repType  = [t| SOP I $(appTyVars codeName' bndrs) |] -- SOP I TreeCode
+    let repType  = [t| SOP I |] `appT` (appTyVars codeName' bndrs) -- SOP I TreeCode
     sequence
       [ tySynD codeName' bndrs codeType                 -- type TreeCode = '[ '[Int], '[Tree, Tree] ]
-      , sigD fromName' [t| $origType -> $repType |]     -- fromTree :: Tree -> SOP I TreeCode
+      , sigD fromName' $ arrowT `appT` origType `appT` repType -- fromTree :: Tree -> SOP I TreeCode
       , embedding fromName' cons                        -- fromTree ... =
-      , sigD toName' [t| $repType -> $origType |]       -- toTree :: SOP I TreeCode -> Tree
+      , sigD toName' $ arrowT `appT` repType `appT` origType -- toTree :: SOP I TreeCode -> Tree
       , projection toName' cons                         -- toTree ... =
       ]
 
@@ -139,7 +139,7 @@ deriveMetadataValue n codeName datatypeInfoName = do
   let datatypeInfoName' = mkName datatypeInfoName
   dec <- reifyDec n
   withDataDec dec $ \isNewtype _cxt name _bndrs cons _derivs -> do
-    sequence [ sigD datatypeInfoName' [t| SOP.DatatypeInfo $(conT codeName') |]                -- treeDatatypeInfo :: DatatypeInfo TreeCode
+    sequence [ sigD datatypeInfoName' $ conT ''SOP.DatatypeInfo `appT` conT codeName'          -- treeDatatypeInfo :: DatatypeInfo TreeCode
              , funD datatypeInfoName' [clause [] (normalB $ metadata' isNewtype name cons) []] -- treeDatatypeInfo = ...
              ]
 {-# DEPRECATED deriveMetadataValue "Use 'deriveMetadataType' and 'demoteDatatypeInfo' instead." #-}
@@ -176,7 +176,7 @@ deriveGenericForDataDec _isNewtype _cxt name bndrs cons _derivs = do
 #endif
   inst <- instanceD
             (cxt [])
-            [t| Generic $typ |]
+            (conT ''Generic `appT` typ)
             [codeSyn, embedding 'from cons, projection 'to cons]
   return [inst]
 
@@ -184,11 +184,11 @@ deriveMetadataForDataDec :: Bool -> Cxt -> Name -> [TyVarBndr] -> [Con] -> Deriv
 deriveMetadataForDataDec isNewtype _cxt name bndrs cons _derivs = do
   let typ = appTyVars name bndrs
   md   <- instanceD (cxt [])
-            [t| HasDatatypeInfo $typ |]
+            (conT ''HasDatatypeInfo `appT` typ)
             [ metadataType typ isNewtype name cons
             , funD 'datatypeInfo
                 [ clause [wildP]
-                  (normalB [| SOP.T.demoteDatatypeInfo (Proxy :: Proxy (DatatypeInfoOf $typ)) |])
+                  (normalB $ varE 'SOP.T.demoteDatatypeInfo `appE` (sigE (conE 'Proxy) (conT ''Proxy `appT` (conT ''DatatypeInfoOf `appT` typ))))
                   []
                 ]
             ]
@@ -212,7 +212,7 @@ codeFor = promotedTypeList . map go
 -------------------------------------------------------------------------------}
 
 embedding :: Name -> [Con] -> Q Dec
-embedding fromName = funD fromName . go' (\e -> [| Z $e |])
+embedding fromName = funD fromName . go' (\e -> conE 'Z `appE` e)
   where
     go' :: (Q Exp -> Q Exp) -> [Con] -> [Q Clause]
     go' _ [] = (:[]) $ do
@@ -222,14 +222,14 @@ embedding fromName = funD fromName . go' (\e -> [| Z $e |])
 
     go :: (Q Exp -> Q Exp) -> [Con] -> [Q Clause]
     go _  []     = []
-    go br (c:cs) = mkClause br c : go (\e -> [| S $(br e) |]) cs
+    go br (c:cs) = mkClause br c : go (\e -> conE 'S `appE` br e) cs
 
     mkClause :: (Q Exp -> Q Exp) -> Con -> Q Clause
     mkClause br c = do
       (n, ts) <- conInfo c
       vars    <- replicateM (length ts) (newName "x")
       clause [conP n (map varP vars)]
-             (normalB [| SOP $(br . npE . map (appE (conE 'I) . varE) $ vars) |])
+             (normalB $ conE 'SOP `appE` (br . npE . map (appE (conE 'I) . varE) $ vars))
              []
 
 projection :: Name -> [Con] -> Q Dec
@@ -271,21 +271,21 @@ metadata' :: Bool -> Name -> [Con] -> Q Exp
 metadata' isNewtype typeName cs = md
   where
     md :: Q Exp
-    md | isNewtype = [| SOP.Newtype $(stringE (nameModule' typeName))
-                                    $(stringE (nameBase typeName))
-                                    $(mdCon (head cs))
-                      |]
-       | otherwise = [| SOP.ADT     $(stringE (nameModule' typeName))
-                                    $(stringE (nameBase typeName))
-                                    $(npE $ map mdCon cs)
-                      |]
+    md | isNewtype = conE 'SOP.Newtype
+                       `appE` stringE (nameModule' typeName)
+                       `appE` stringE (nameBase typeName)
+                       `appE` mdCon (head cs)
+       | otherwise = conE 'SOP.ADT
+                       `appE` stringE (nameModule' typeName)
+                       `appE` stringE (nameBase typeName)
+                       `appE` npE (map mdCon cs)
 
 
     mdCon :: Con -> Q Exp
-    mdCon (NormalC n _)   = [| SOP.Constructor $(stringE (nameBase n)) |]
-    mdCon (RecC n ts)     = [| SOP.Record      $(stringE (nameBase n))
-                                               $(npE (map mdField ts))
-                             |]
+    mdCon (NormalC n _)   = conE 'SOP.Constructor `appE` stringE (nameBase n)
+    mdCon (RecC n ts)     = conE 'SOP.Record
+                              `appE` stringE (nameBase n)
+                              `appE` npE (map mdField ts)
     mdCon (InfixC _ n _)  = do
 #if MIN_VERSION_template_haskell(2,11,0)
       fixity <- reifyFixity n
@@ -296,7 +296,7 @@ metadata' isNewtype typeName cs = md
       case i of
         DataConI _ _ _ (Fixity f a) ->
 #endif
-                            [| SOP.Infix       $(stringE (nameBase n)) $(mdAssociativity a) f |]
+                            conE 'SOP.Infix `appE` stringE (nameBase n) `appE` mdAssociativity a `appE` lift f
 #if !MIN_VERSION_template_haskell(2,11,0)
         _                -> fail "Strange infix operator"
 #endif
@@ -307,7 +307,7 @@ metadata' isNewtype typeName cs = md
 #endif
 
     mdField :: VarStrictType -> Q Exp
-    mdField (n, _, _) = [| SOP.FieldInfo $(stringE (nameBase n)) |]
+    mdField (n, _, _) = conE 'SOP.FieldInfo `appE` stringE (nameBase n)
 
     mdAssociativity :: FixityDirection -> Q Exp
     mdAssociativity InfixL = [| SOP.LeftAssociative  |]
@@ -319,21 +319,21 @@ metadataType' :: Bool -> Name -> [Con] -> Q Type
 metadataType' isNewtype typeName cs = md
   where
     md :: Q Type
-    md | isNewtype = [t| 'SOP.T.Newtype $(stringT (nameModule' typeName))
-                                        $(stringT (nameBase typeName))
-                                        $(mdCon (head cs))
-                       |]
-       | otherwise = [t| 'SOP.T.ADT     $(stringT (nameModule' typeName))
-                                        $(stringT (nameBase typeName))
-                                        $(promotedTypeList $ map mdCon cs)
-                       |]
+    md | isNewtype = conT 'SOP.T.Newtype
+                       `appT` stringT (nameModule' typeName)
+                       `appT` stringT (nameBase typeName)
+                       `appT` mdCon (head cs)
+       | otherwise = conT 'SOP.T.ADT
+                       `appT` stringT (nameModule' typeName)
+                       `appT` stringT (nameBase typeName)
+                       `appT` promotedTypeList (map mdCon cs)
 
 
     mdCon :: Con -> Q Type
-    mdCon (NormalC n _)   = [t| 'SOP.T.Constructor $(stringT (nameBase n)) |]
-    mdCon (RecC n ts)     = [t| 'SOP.T.Record      $(stringT (nameBase n))
-                                                   $(promotedTypeList (map mdField ts))
-                              |]
+    mdCon (NormalC n _)   = conT 'SOP.T.Constructor `appT` stringT (nameBase n)
+    mdCon (RecC n ts)     = conT 'SOP.T.Record
+                              `appT` stringT (nameBase n)
+                              `appT` promotedTypeList (map mdField ts)
     mdCon (InfixC _ n _)  = do
 #if MIN_VERSION_template_haskell(2,11,0)
       fixity <- reifyFixity n
@@ -344,7 +344,7 @@ metadataType' isNewtype typeName cs = md
       case i of
         DataConI _ _ _ (Fixity f a) ->
 #endif
-                            [t| 'SOP.T.Infix       $(stringT (nameBase n)) $(mdAssociativity a) $(natT f) |]
+                            conT 'SOP.T.Infix `appT` stringT (nameBase n) `appT` mdAssociativity a `appT` natT f
 #if !MIN_VERSION_template_haskell(2,11,0)
         _                -> fail "Strange infix operator"
 #endif
@@ -355,7 +355,7 @@ metadataType' isNewtype typeName cs = md
 #endif
 
     mdField :: VarStrictType -> Q Type
-    mdField (n, _, _) = [t| 'SOP.T.FieldInfo $(stringT (nameBase n)) |]
+    mdField (n, _, _) = conT 'SOP.T.FieldInfo `appT` stringT (nameBase n)
 
     mdAssociativity :: FixityDirection -> Q Type
     mdAssociativity InfixL = [t| 'SOP.T.LeftAssociative  |]
@@ -378,7 +378,7 @@ nameModule' = fromMaybe "" . nameModule
 -- > a :* b :* c :* Nil
 npE :: [Q Exp] -> Q Exp
 npE []     = [| Nil |]
-npE (e:es) = [| $e :* $(npE es) |]
+npE (e:es) = conE '(:*) `appE` e `appE` npE es
 
 -- Like npE, but construct a pattern instead
 npP :: [Q Pat] -> Q Pat
@@ -407,15 +407,15 @@ natT = litT . numTyLit . fromIntegral
 
 promotedTypeList :: [Q Type] -> Q Type
 promotedTypeList []     = promotedNilT
-promotedTypeList (t:ts) = [t| $promotedConsT $t $(promotedTypeList ts) |]
+promotedTypeList (t:ts) = promotedConsT `appT` t `appT` promotedTypeList ts
 
 appTyVars :: Name -> [TyVarBndr] -> Q Type
 appTyVars n = go (conT n)
   where
     go :: Q Type -> [TyVarBndr] -> Q Type
     go t []                  = t
-    go t (PlainTV  v   : vs) = go [t| $t $(varT v) |] vs
-    go t (KindedTV v _ : vs) = go [t| $t $(varT v) |] vs
+    go t (PlainTV  v   : vs) = go (t `appT` varT v) vs
+    go t (KindedTV v _ : vs) = go (t `appT` varT v) vs
 
 reifyDec :: Name -> Q Dec
 reifyDec name =
