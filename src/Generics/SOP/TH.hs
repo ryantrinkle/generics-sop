@@ -108,7 +108,7 @@ deriveGenericFunctions n codeName fromName toName = do
   withDataDec dec $ \_isNewtype _cxt name bndrs cons _derivs -> do
     let codeType = codeFor cons                        -- '[ '[Int], '[Tree, Tree] ]
     let origType = appTyVars name bndrs                -- Tree
-    let repType  = [t| SOP I |] `appT` (appTyVars codeName' bndrs) -- SOP I TreeCode
+    let repType  = conT ''SOP `appT` conT ''I `appT` (appTyVars codeName' bndrs) -- SOP I TreeCode
     sequence
       [ tySynD codeName' bndrs codeType                 -- type TreeCode = '[ '[Int], '[Tree, Tree] ]
       , sigD fromName' $ arrowT `appT` origType `appT` repType -- fromTree :: Tree -> SOP I TreeCode
@@ -255,7 +255,7 @@ projection toName = funD toName . go' (\p -> conP 'Z [p])
 
 unreachable :: Q Clause
 unreachable = clause [wildP]
-                     (normalB [| error "unreachable" |])
+                     (normalB $ varE 'error `appE` lift "unreachable")
                      []
 
 {-------------------------------------------------------------------------------
@@ -310,9 +310,9 @@ metadata' isNewtype typeName cs = md
     mdField (n, _, _) = conE 'SOP.FieldInfo `appE` stringE (nameBase n)
 
     mdAssociativity :: FixityDirection -> Q Exp
-    mdAssociativity InfixL = [| SOP.LeftAssociative  |]
-    mdAssociativity InfixR = [| SOP.RightAssociative |]
-    mdAssociativity InfixN = [| SOP.NotAssociative   |]
+    mdAssociativity InfixL = conE 'SOP.LeftAssociative
+    mdAssociativity InfixR = conE 'SOP.RightAssociative
+    mdAssociativity InfixN = conE 'SOP.NotAssociative
 
 -- | Derive type-level metadata.
 metadataType' :: Bool -> Name -> [Con] -> Q Type
@@ -358,9 +358,9 @@ metadataType' isNewtype typeName cs = md
     mdField (n, _, _) = conT 'SOP.T.FieldInfo `appT` stringT (nameBase n)
 
     mdAssociativity :: FixityDirection -> Q Type
-    mdAssociativity InfixL = [t| 'SOP.T.LeftAssociative  |]
-    mdAssociativity InfixR = [t| 'SOP.T.RightAssociative |]
-    mdAssociativity InfixN = [t| 'SOP.T.NotAssociative   |]
+    mdAssociativity InfixL = conT 'SOP.T.LeftAssociative
+    mdAssociativity InfixR = conT 'SOP.T.RightAssociative
+    mdAssociativity InfixN = conT 'SOP.T.NotAssociative
 
 nameModule' :: Name -> String
 nameModule' = fromMaybe "" . nameModule
@@ -377,7 +377,7 @@ nameModule' = fromMaybe "" . nameModule
 --
 -- > a :* b :* c :* Nil
 npE :: [Q Exp] -> Q Exp
-npE []     = [| Nil |]
+npE []     = conT ''Nil
 npE (e:es) = conE '(:*) `appE` e `appE` npE es
 
 -- Like npE, but construct a pattern instead
